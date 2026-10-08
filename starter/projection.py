@@ -32,7 +32,16 @@ def velo_to_cam(points_xyz: np.ndarray, calib: KittiCalib) -> np.ndarray:
       3. Trả về 3 cột đầu.
     Tự kiểm: một điểm velodyne (10, 0, 0) phải có z_cam ~ 10 (phía trước camera).
     """
-    raise NotImplementedError("TODO(CP2): cài đặt velo_to_cam")
+    points_xyz = np.asarray(points_xyz)
+    if points_xyz.ndim != 2 or points_xyz.shape[1] != 3:
+        raise ValueError(f"points_xyz phải có shape (N, 3), nhận được {points_xyz.shape}")
+
+    # Mỗi điểm là một vector hàng, do đó p_cam = T @ p_velo được viết
+    # thành points_h @ T.T. Cột 1 cuối cùng làm cho phần tịnh tiến có tác dụng.
+    ones = np.ones((len(points_xyz), 1), dtype=points_xyz.dtype)
+    points_h = np.hstack((points_xyz, ones))
+    points_cam_h = points_h @ calib.T_cam_velo.T
+    return points_cam_h[:, :3]
 
 
 def cam_to_image(points_cam: np.ndarray, P2: np.ndarray, image_shape: tuple[int, ...],
@@ -52,7 +61,42 @@ def cam_to_image(points_cam: np.ndarray, P2: np.ndarray, image_shape: tuple[int,
       3. Chia cho s để có (u, v). Chỉ chia với điểm có depth > min_depth.
       4. Lọc theo kích thước ảnh image_shape[:2] = (H, W).
     """
-    raise NotImplementedError("TODO(CP2): cài đặt cam_to_image")
+    points_cam = np.asarray(points_cam)
+    if points_cam.ndim != 2 or points_cam.shape[1] != 3:
+        raise ValueError(f"points_cam phải có shape (N, 3), nhận được {points_cam.shape}")
+    if P2.shape != (3, 4):
+        raise ValueError(f"P2 phải có shape (3, 4), nhận được {P2.shape}")
+
+    n_points = len(points_cam)
+    mask = np.isfinite(points_cam).all(axis=1) & (points_cam[:, 2] > min_depth)
+    candidate_indices = np.flatnonzero(mask)
+    if candidate_indices.size == 0:
+        return (np.empty((0, 2), dtype=np.float64),
+                np.empty((0,), dtype=points_cam.dtype), mask)
+
+    valid_cam = points_cam[candidate_indices]
+    ones = np.ones((len(valid_cam), 1), dtype=valid_cam.dtype)
+    projected = np.hstack((valid_cam, ones)) @ P2.T
+
+    # min_depth đã được kiểm tra trước phép chia. Kiểm tra thêm mẫu số hữu hạn
+    # để hàm an toàn với một ma trận chiếu không chuẩn.
+    scale = projected[:, 2]
+    projectable = np.isfinite(projected).all(axis=1) & np.isfinite(scale) & (np.abs(scale) > 1e-12)
+    uv_candidates = np.full((len(valid_cam), 2), np.nan, dtype=np.float64)
+    uv_candidates[projectable] = projected[projectable, :2] / scale[projectable, None]
+
+    height, width = image_shape[:2]
+    inside = (projectable
+              & (uv_candidates[:, 0] >= 0) & (uv_candidates[:, 0] < width)
+              & (uv_candidates[:, 1] >= 0) & (uv_candidates[:, 1] < height))
+
+    # Chuyển mask cục bộ của các candidate về mask có N phần tử của đầu vào.
+    mask[:] = False
+    mask[candidate_indices[inside]] = True
+    uv = uv_candidates[inside]
+    depth = points_cam[mask, 2]
+    assert mask.shape == (n_points,)
+    return uv, depth, mask
 
 
 def project_velo_to_image(points: np.ndarray, calib: KittiCalib, image_shape: tuple[int, ...]):
